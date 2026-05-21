@@ -101,14 +101,13 @@ def is_hong_kong(name):
     return re.search(hk_regex, name, re.IGNORECASE) is not None
 
 
-def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=None):
-    logger = setup_subscription_logging()
+def convert_subscription(url, output_path, logger, hk_split=False, exclusion_patterns=None):
 
     if exclusion_patterns is None:
         exclusion_patterns = []
 
     try:
-        print(f"Fetching subscription...")
+        logger.info(f"Fetching subscription...")
         response = requests.get(
             url,
             impersonate="chrome120",
@@ -126,7 +125,7 @@ def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=No
             decoded_text = base64.b64decode(
                 raw_data).decode('utf-8', errors='ignore')
         except Exception as decode_err:
-            print(f"Error while decoding Base64 string: {decode_err}")
+            logger.error(f"Error while decoding Base64 string: {decode_err}")
             return
 
         log_message = (
@@ -167,7 +166,7 @@ def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=No
             try:
                 proxy.update(PROTOCOL_PARSERS[parsed.scheme](parsed, params))
             except Exception as parse_proto_err:
-                print(
+                logger.error(
                     f"Skipping malformed {parsed.scheme} node [{name}]: {parse_proto_err}")
                 continue
 
@@ -192,8 +191,7 @@ def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=No
                 f"  Plugin Str : {params.get('plugin', [''])[0]}\n"
                 f"  Final Proxy: SERVER={proxy.get('server')} | SNI={proxy.get('sni', proxy.get('servername', 'None'))}"
             )
-            # Print to terminal for instant feedback
-            print(debug_msg)
+
             # Write to subscription_runs.log for historical tracking
             logger.info(debug_msg)
 
@@ -204,12 +202,13 @@ def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=No
 
         def save_yaml(data, path):
             if not data:
-                print(f"No proxies found to save for path: {path}")
+                logger.warning(f"No proxies found to save for path: {path}")
                 return
             with open(path, 'w', encoding='utf-8') as f:
                 yaml.dump({"proxies": data}, f, allow_unicode=True,
                           sort_keys=False, default_flow_style=False)
             os.chmod(path, 0o644)
+            logger.info(f"Generated '{path}' with {len(data)} proxies.")
             print(f"Generated '{path}' with {len(data)} proxies.")
 
         save_yaml(main_proxies, output_path)
@@ -217,7 +216,7 @@ def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=No
             save_yaml(hk_proxies, output_path.replace(".yaml", "-hk.yaml"))
 
     except Exception as e:
-        print(f"Critical execution error: {e}")
+        logger.error(f"Critical execution error: {e}")
 
 
 if __name__ == "__main__":
@@ -236,13 +235,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # Determine execution mode: Config file vs CLI
     using_custom_config = args.config != "config.yaml"
+    logger = setup_subscription_logging()
 
     if using_custom_config or os.path.exists(args.config):
         if not os.path.exists(args.config):
-            print(f"Error: Config file '{args.config}' not found.")
+            logger.error(f"Error: Config file '{args.config}' not found.")
             sys.exit(1)
 
-        print(f"Reading configuration from '{args.config}'...")
+        logger.info(f"Reading configuration from '{args.config}'...")
         with open(args.config, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f) or {}
 
@@ -252,7 +252,7 @@ if __name__ == "__main__":
 
         subscriptions = config.get("subscriptions", [])
         if not subscriptions:
-            print("No subscriptions found in config file.")
+            logger.warning("No subscriptions found in config file.")
             sys.exit(0)
 
         for sub in subscriptions:
@@ -260,7 +260,8 @@ if __name__ == "__main__":
             url = sub.get("url")
 
             if not name or not url:
-                print("Skipping malformed subscription (missing 'name' or 'url').")
+                logger.error(
+                    "Skipping malformed subscription (missing 'name' or 'url').")
                 continue
 
             # Object fields override general fields
@@ -275,8 +276,9 @@ if __name__ == "__main__":
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
 
-            print(f"\n--- Processing Subscription: {name} ---")
-            convert_subscription(url, output_path, split_hk, exclude_list)
+            logger.info(f"\n--- Processing Subscription: {name} ---")
+            convert_subscription(url, output_path, logger,
+                                 split_hk, exclude_list)
 
     elif args.url:
         # Fallback to pure CLI mode
@@ -286,7 +288,7 @@ if __name__ == "__main__":
                 exclusion_patterns = [line.strip()
                                       for line in f if line.strip()]
 
-        convert_subscription(args.url, args.output,
+        convert_subscription(args.url, args.output, logger,
                              args.hk, exclusion_patterns)
 
     else:
