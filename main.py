@@ -1,4 +1,5 @@
 import base64
+import datetime
 import logging
 import urllib.parse
 import yaml
@@ -7,94 +8,64 @@ import os
 import argparse
 import sys
 import re
+from proto_parser import parse_vless, parse_trojan, parse_hysteria2, parse_shadowsocks
 
-def setup_subscription_logging(log_filename="subscription_runs.log"):
+
+def setup_subscription_logging(log_filename=f'{datetime.datetime.now().strftime("%Y%m%d_%H%M%S.log")}'):
     """Configures a file logger to append run data without cluttering stdout."""
     logger = logging.getLogger("SubscriptionLogger")
     logger.setLevel(logging.INFO)
-    
+
     # Avoid duplicate handlers if script main gets called multiple times
     if not logger.handlers:
-        file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+        os.makedirs("./log", exist_ok=True)
+        log_file = os.path.join("./log", log_filename)
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         # Format: Timestamp | Message
-        formatter = logging.Formatter('%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+        formatter = logging.Formatter(
+            '%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     return logger
 
-# --- Protocol Helper Functions ---
-
-def parse_vless(parsed, params):
-    security = params.get('security', [''])[0]
-    sni = params.get('sni', [None])[0]
-    flow = params.get('flow', [None])[0]
-    fp = params.get('fp', ['chrome'])[0]
-    
-    config = {
-        "type": "vless",
-        "uuid": parsed.username,
-        "tls": security in ['tls', 'reality'],
-        "servername": sni if sni else parsed.hostname,
-        "client-fingerprint": fp
-    }
-    if flow: config["flow"] = flow
-    if security == 'reality':
-        config["reality-opts"] = {
-            "public-key": params.get('pbk', [''])[0],
-            "short-id": params.get('sid', [''])[0]
-        }
-    return config
-
-def parse_trojan(parsed, params):
-    sni = params.get('sni', [None])[0]
-    return {
-        "type": "trojan",
-        "password": parsed.username,
-        "sni": sni if sni else parsed.hostname
-    }
-
-def parse_hysteria2(parsed, params):
-    obfs = params.get('obfs', [None])[0]
-    obfs_pw = params.get('obfs-password', params.get('m', [None]))[0]
-    config = {
-        "type": "hysteria2",
-        "password": parsed.username,
-        "sni": params.get('sni', [parsed.hostname])[0],
-    }
-    if params.get('up'): config['up'] = int(params.get('up')[0])
-    if params.get('down'): config['down'] = int(params.get('down')[0])
-    if params.get('cwnd'): config['cwnd'] = int(params.get('cwnd')[0])
-    if obfs:
-        config['obfs'] = obfs
-        if obfs_pw: config['obfs-password'] = obfs_pw
-    return config
 
 def parse_shadowsocks(parsed, params):
-    """Parses ss:// links, detecting AnyTLS configurations for Mihomo."""
-    # Shadowsocks credentials can be legacy base64 or standard userinfo style
+    """Parses ss:// links, detecting AnyTLS configs and hidden SIP003 plugin hosts."""
     userinfo = parsed.username
     if not userinfo and parsed.netloc:
-        # Handle cases where the netloc itself is entirely base64-encoded
         maybe_encoded = parsed.netloc.split('@')[0]
         try:
-            # Fix base64 padding issues
             maybe_encoded += "=" * ((4 - len(maybe_encoded) % 4) % 4)
-            decoded_userinfo = base64.b64decode(maybe_encoded).decode('utf-8', errors='ignore')
+            decoded_userinfo = base64.b64decode(
+                maybe_encoded).decode('utf-8', errors='ignore')
             if ":" in decoded_userinfo:
                 userinfo = decoded_userinfo
         except Exception:
             pass
 
-    # Extract cipher and password
     cipher, password = "aes-128-gcm", ""
     if userinfo and ":" in userinfo:
         cipher, password = userinfo.split(":", 1)
     elif parsed.username:
         password = parsed.username
 
+    # 1. Start with top-level SNI if it exists
     sni = params.get('sni', [None])[0]
-    
-    
+
+    # 2. Extract hidden host/sni from inside the SIP003 plugin strings
+    plugin = params.get('plugin', [''])[0]
+    plugin_opts = params.get('plugin-opts', [''])[0]
+
+    # Combine both and split by semicolon to find the true routing host
+    combined_opts = f"{plugin};{plugin_opts}"
+    for opt in combined_opts.split(';'):
+        opt = opt.strip()
+        if opt.startswith('host='):
+            sni = opt[5:]
+        elif opt.startswith('sni='):
+            sni = opt[4:]
+
+    # 3. Generate the pristine AnyTLS format
     return {
         "type": "anytls",
         "password": password,
@@ -102,6 +73,7 @@ def parse_shadowsocks(parsed, params):
         "sni": sni if sni else parsed.hostname,
         "alpn": ["http/1.1"]
     }
+
 
 PROTOCOL_PARSERS = {
     "vless": parse_vless,
@@ -113,6 +85,7 @@ PROTOCOL_PARSERS = {
 
 # --- Utility Functions ---
 
+
 def should_exclude(name, exclusion_patterns):
     for pattern in exclusion_patterns:
         try:
@@ -122,37 +95,40 @@ def should_exclude(name, exclusion_patterns):
             continue
     return False
 
+
 def is_hong_kong(name):
     hk_regex = r"(香港|Hong\s*Kong|HK|hong\s*kong|🇭🇰)"
     return re.search(hk_regex, name, re.IGNORECASE) is not None
 
-def convert_subscription(url, output_path, hk_split=False, exclude_file=None):
+
+def convert_subscription(url, output_path, hk_split=False, exclusion_patterns=None):
     logger = setup_subscription_logging()
-    exclusion_patterns = []
-    if exclude_file and os.path.exists(exclude_file):
-        with open(exclude_file, 'r', encoding='utf-8') as f:
-            exclusion_patterns = [line.strip() for line in f if line.strip()]
+
+    if exclusion_patterns is None:
+        exclusion_patterns = []
 
     try:
         print(f"Fetching subscription...")
         response = requests.get(
-            url, 
-            impersonate="chrome120", 
+            url,
+            impersonate="chrome120",
             timeout=(5, 10),
-            headers={"User-Agent": "Shadowrocket/2.2.85 CFNetwork/1498.7 Darwin/24.1.0", "Accept": "*/*"}
+            headers={
+                "User-Agent": "Shadowrocket/2.2.85 CFNetwork/1498.7 Darwin/24.1.0", "Accept": "*/*"}
         )
         response.raise_for_status()
-        
+
         raw_data = response.text.strip()
         raw_data = re.sub(r'\s+', '', raw_data)
         raw_data += "=" * ((4 - len(raw_data) % 4) % 4)
-        
+
         try:
-            decoded_text = base64.b64decode(raw_data).decode('utf-8', errors='ignore')
+            decoded_text = base64.b64decode(
+                raw_data).decode('utf-8', errors='ignore')
         except Exception as decode_err:
             print(f"Error while decoding Base64 string: {decode_err}")
             return
-            
+
         log_message = (
             f"\n--- RUN START ---\n"
             f"URL: {url}\n"
@@ -168,14 +144,15 @@ def convert_subscription(url, output_path, hk_split=False, exclude_file=None):
             link = link.strip()
             if not link:
                 continue
-                
+
             parsed = urllib.parse.urlparse(link)
             if parsed.scheme not in PROTOCOL_PARSERS:
                 continue
-            
+
             params = urllib.parse.parse_qs(parsed.query)
-            name = urllib.parse.unquote(parsed.fragment) or f"{parsed.scheme}-{parsed.hostname}"
-            
+            name = urllib.parse.unquote(
+                parsed.fragment) or f"{parsed.scheme}-{parsed.hostname}"
+
             if should_exclude(name, exclusion_patterns):
                 continue
 
@@ -186,11 +163,12 @@ def convert_subscription(url, output_path, hk_split=False, exclude_file=None):
                 "udp": True,
                 "skip-cert-verify": True,
             }
-            
+
             try:
                 proxy.update(PROTOCOL_PARSERS[parsed.scheme](parsed, params))
             except Exception as parse_proto_err:
-                print(f"Skipping malformed {parsed.scheme} node [{name}]: {parse_proto_err}")
+                print(
+                    f"Skipping malformed {parsed.scheme} node [{name}]: {parse_proto_err}")
                 continue
 
             # Transport layer logic (only for protocols that use standard ws/grpc)
@@ -204,7 +182,20 @@ def convert_subscription(url, output_path, hk_split=False, exclude_file=None):
                     }
                 elif net_type == "grpc":
                     proxy["network"] = "grpc"
-                    proxy["grpc-opts"] = {"grpc-service-name": params.get('serviceName', [''])[0]}
+                    proxy["grpc-opts"] = {
+                        "grpc-service-name": params.get('serviceName', [''])[0]}
+
+            debug_msg = (
+                f"\n[DEBUG] Node: {name}\n"
+                f"  Raw URL    : {link}\n"
+                f"  Parsed Host: {parsed.hostname}\n"
+                f"  Plugin Str : {params.get('plugin', [''])[0]}\n"
+                f"  Final Proxy: SERVER={proxy.get('server')} | SNI={proxy.get('sni', proxy.get('servername', 'None'))}"
+            )
+            # Print to terminal for instant feedback
+            print(debug_msg)
+            # Write to subscription_runs.log for historical tracking
+            logger.info(debug_msg)
 
             if hk_split and is_hong_kong(name):
                 hk_proxies.append(proxy)
@@ -212,11 +203,12 @@ def convert_subscription(url, output_path, hk_split=False, exclude_file=None):
                 main_proxies.append(proxy)
 
         def save_yaml(data, path):
-            if not data: 
+            if not data:
                 print(f"No proxies found to save for path: {path}")
                 return
             with open(path, 'w', encoding='utf-8') as f:
-                yaml.dump({"proxies": data}, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+                yaml.dump({"proxies": data}, f, allow_unicode=True,
+                          sort_keys=False, default_flow_style=False)
             os.chmod(path, 0o644)
             print(f"Generated '{path}' with {len(data)} proxies.")
 
@@ -227,12 +219,77 @@ def convert_subscription(url, output_path, hk_split=False, exclude_file=None):
     except Exception as e:
         print(f"Critical execution error: {e}")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("url")
-    parser.add_argument("-o", "--output", default="provider.yaml")
-    parser.add_argument("--hk", action="store_true")
-    parser.add_argument("--excluded_KW_file", "--exclude-file", dest="exclude_file")
+    parser.add_argument(
+        "url", nargs="?", help="Base64 subscription URL (optional if using config file)")
+    parser.add_argument("-o", "--output", default="provider.yaml",
+                        help="Output path (for CLI mode)")
+    parser.add_argument("--hk", action="store_true",
+                        help="Split Hong Kong servers (for CLI mode)")
+    parser.add_argument("--excluded_KW_file", "--exclude-file",
+                        dest="exclude_file", help="Regex exclusions file (for CLI mode)")
+    parser.add_argument("-c", "--config", default="config.yaml",
+                        help="Path to YAML config file")
 
     args = parser.parse_args()
-    convert_subscription(args.url, args.output, args.hk, args.exclude_file)
+    # Determine execution mode: Config file vs CLI
+    using_custom_config = args.config != "config.yaml"
+
+    if using_custom_config or os.path.exists(args.config):
+        if not os.path.exists(args.config):
+            print(f"Error: Config file '{args.config}' not found.")
+            sys.exit(1)
+
+        print(f"Reading configuration from '{args.config}'...")
+        with open(args.config, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+
+        # Extract general configurations
+        general_split_hk = config.get("split_hk", False)
+        general_exclude = config.get("exclude", [])
+
+        subscriptions = config.get("subscriptions", [])
+        if not subscriptions:
+            print("No subscriptions found in config file.")
+            sys.exit(0)
+
+        for sub in subscriptions:
+            name = sub.get("name")
+            url = sub.get("url")
+
+            if not name or not url:
+                print("Skipping malformed subscription (missing 'name' or 'url').")
+                continue
+
+            # Object fields override general fields
+            split_hk = sub.get("split_hk", general_split_hk)
+            exclude_list = sub.get("exclude", general_exclude)
+
+            # Default output path handling: ./output/<name>.yaml
+            output_path = sub.get("file", f"./output/{name}.yaml")
+
+            # Ensure the output directory exists
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+
+            print(f"\n--- Processing Subscription: {name} ---")
+            convert_subscription(url, output_path, split_hk, exclude_list)
+
+    elif args.url:
+        # Fallback to pure CLI mode
+        exclusion_patterns = []
+        if args.exclude_file and os.path.exists(args.exclude_file):
+            with open(args.exclude_file, 'r', encoding='utf-8') as f:
+                exclusion_patterns = [line.strip()
+                                      for line in f if line.strip()]
+
+        convert_subscription(args.url, args.output,
+                             args.hk, exclusion_patterns)
+
+    else:
+        print("Error: No config file found and no URL provided via CLI.")
+        parser.print_help()
+        sys.exit(1)

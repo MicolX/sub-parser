@@ -1,0 +1,26 @@
+# --- General Config ---
+# These apply to all subscriptions unless overridden.
+split_hk: false
+exclude:
+  - ".*倍率.*"
+  - ".*导航.*"
+  - ".*套餐.*"
+  - ".*流量.*"
+  - ".*重置.*"
+
+# --- Subscriptions ---
+subscriptions:
+  # Example 1: Basic setup
+  # This will use the general config above and output to ./output/sub-provider-1.yaml
+  - name: "sub-provider-1"
+    url: "https://YOUR_SUBSCRIPTION_URL_HERE"
+
+  # Example 2: Advanced setup overriding the general configs
+  # This explicitly turns on Hong Kong splitting and uses a custom exclusion list and custom file path.
+  - name: "sub-provider-2"
+    url: "https://ANOTHER_SUBSCRIPTION_URL_HERE"
+    file: "./custom-folder/my-custom-provider.yaml"
+    split_hk: true
+    exclude:
+      - ".*过期.*" # Matches "expired"
+      - "^INFO" # Matches anything starting with INFO
