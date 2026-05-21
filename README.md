@@ -27,9 +27,26 @@ cd sub-parser
 
 # 3. Synchronize environment and dependencies
 uv sync
+```
 
+## ⚙️ Configuration File Guide(config.yaml)
 
-## config.yaml
+The script is driven by a config.yaml file located in the root directory. This file defines global defaults and an array of subscription targets.
+
+Hierarchy & Overrides
+Properties defined at the top level act as General Configs (defaults for all entries). Properties defined inside a specific subscription block act as Object Configs and will completely override the general defaults for that subscription.
+
+### Field Definitions
+
+Field Name,Type,Context,Description
+split_hk,Boolean,General & Sub,"Maps Hong Kong nodes to a separate file (e.g., <name>-hk.yaml). Defaults to false."
+exclude,Array (Regex),General & Sub,A list of case-insensitive regular expression strings. Nodes matching any pattern are skipped.
+subscriptions,Array (Objects),Root Level,[Required] The list of subscription objects to process.
+sub.name,String,Sub Object,[Required] A unique identifier for the provider. Used for naming output files.
+sub.url,String,Sub Object,[Required] The raw base64 subscription endpoint link.
+sub.file,String,Sub Object,[Optional] Custom destination path. Default: ./output/<name>.yaml
+
+```bash
 # =====================================================================
 # GENERAL CONFIG (Global Defaults)
 # =====================================================================
